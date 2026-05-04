@@ -1,0 +1,9 @@
+build/
+*.o
+references.json.gz
+references.json
+vectors.bin
+labels.bin
+centroids.bin
+offsets.bin
+verify.py
