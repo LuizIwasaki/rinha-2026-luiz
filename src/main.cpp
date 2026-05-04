@@ -1,4 +1,4 @@
-// Rinha 2026 - Single-threaded epoll, NPROBE=1
+// Rinha 2026 - Epoll + HTTP Keep-Alive + AVX2 + NPROBE=1
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -12,9 +12,9 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <cerrno>
-#include <emmintrin.h>
+#include <immintrin.h>
 
-static constexpr int DIMS=14, KNN=5, NPROBE=1, BUF_SIZE=4096, MAX_EV=1024;
+static constexpr int DIMS=14, KNN=5, NPROBE=1, BUF_SIZE=4096, MAX_EV=512;
 static constexpr float THRESHOLD=0.6f;
 static int32_t g_nrefs=0,g_ncent=0;
 static float *g_cent=nullptr,*g_vecs=nullptr;
@@ -30,7 +30,6 @@ static bool load(){
     snprintf(p,512,"%s/labels.bin",dir);auto*lm=(uint8_t*)mf(p,sz);if(!lm)return false;g_lbl=lm+4;
     return true;
 }
-#include <immintrin.h>
 static inline float dsse(const float* a, const float* b){
     __m256 v0 = _mm256_sub_ps(_mm256_loadu_ps(a), _mm256_loadu_ps(b));
     __m256 sq0 = _mm256_mul_ps(v0, v0);
@@ -92,39 +91,132 @@ static float knn(const float q[DIMS]){
     }
     int f=0;for(int i=0;i<nt;i++)if(g_lbl[top[i].i]==1)f++;return(float)f/KNN;
 }
-struct CB{char buf[BUF_SIZE];int len;};static CB g_cb[65536];
-static int proc(const char*req,int,char*resp){
-    if(memcmp(req,"GET",3)==0&&strstr(req,"/ready"))return snprintf(resp,BUF_SIZE,"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
-    if(memcmp(req,"POST",4)==0&&strstr(req,"/fraud-score")){
-        const char*b=strstr(req,"\r\n\r\n");if(!b)return 0;b+=4;float q[DIMS];vec(b,q);float s=knn(q);
-        char j[128];int jl=snprintf(j,128,"{\"approved\":%s,\"fraud_score\":%.1f}",s<THRESHOLD?"true":"false",s);
-        return snprintf(resp,BUF_SIZE,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s",jl,j);
-    }
-    return snprintf(resp,BUF_SIZE,"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+
+// Connection buffer - reduced to 2048 entries to save memory
+struct CB{char buf[BUF_SIZE];int len;};
+static CB g_cb[4096];
+
+// Find end of current HTTP request, returns pointer past body or nullptr
+static const char* find_request_end(const char* buf, int len) {
+    const char* hdr_end = strstr(buf, "\r\n\r\n");
+    if (!hdr_end) return nullptr;
+    const char* body = hdr_end + 4;
+    if (memcmp(buf, "GET", 3) == 0) return body; // GET has no body
+    // POST - check Content-Length
+    const char* cl = strstr(buf, "Content-Length:");
+    if (!cl) cl = strstr(buf, "content-length:");
+    if (!cl) return body;
+    int clen = atoi(cl + 15);
+    int body_offset = body - buf;
+    if (len - body_offset >= clen) return body + clen;
+    return nullptr; // body incomplete
 }
+
+static int make_response(const char* req, char* resp) {
+    if (memcmp(req, "GET", 3) == 0 && strstr(req, "/ready"))
+        return snprintf(resp, BUF_SIZE, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+    if (memcmp(req, "POST", 4) == 0 && strstr(req, "/fraud-score")) {
+        const char* b = strstr(req, "\r\n\r\n");
+        if (!b) return 0;
+        b += 4;
+        float q[DIMS]; vec(b, q); float s = knn(q);
+        char j[128];
+        int jl = snprintf(j, 128, "{\"approved\":%s,\"fraud_score\":%.1f}", s < THRESHOLD ? "true" : "false", s);
+        return snprintf(resp, BUF_SIZE, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", jl, j);
+    }
+    return snprintf(resp, BUF_SIZE, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+}
+
 int main(){
-    int port=8080;const char*pe=getenv("PORT");if(pe)port=atoi(pe);
-    if(!load())return 1;
-    int sfd=socket(AF_INET,SOCK_STREAM,0);int opt=1;setsockopt(sfd,SOL_SOCKET,SO_REUSEADDR,&opt,sizeof(opt));
-    struct sockaddr_in addr={};addr.sin_family=AF_INET;addr.sin_addr.s_addr=INADDR_ANY;addr.sin_port=htons(port);
-    bind(sfd,(struct sockaddr*)&addr,sizeof(addr));listen(sfd,SOMAXCONN);fcntl(sfd,F_SETFL,O_NONBLOCK);
-    int epfd=epoll_create1(0);struct epoll_event ev,events[MAX_EV];ev.events=EPOLLIN;ev.data.fd=sfd;epoll_ctl(epfd,EPOLL_CTL_ADD,sfd,&ev);
+    int port=8080; const char*pe=getenv("PORT"); if(pe) port=atoi(pe);
+    if(!load()) return 1;
+    fprintf(stderr, "Loaded %d refs, %d centroids, port %d\n", g_nrefs, g_ncent, port);
+
+    int sfd = socket(AF_INET, SOCK_STREAM, 0);
+    int opt = 1;
+    setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    struct sockaddr_in addr = {};
+    addr.sin_family = AF_INET; addr.sin_addr.s_addr = INADDR_ANY; addr.sin_port = htons(port);
+    bind(sfd, (struct sockaddr*)&addr, sizeof(addr));
+    listen(sfd, SOMAXCONN);
+    fcntl(sfd, F_SETFL, O_NONBLOCK);
+
+    int epfd = epoll_create1(0);
+    struct epoll_event ev, events[MAX_EV];
+    ev.events = EPOLLIN; ev.data.fd = sfd;
+    epoll_ctl(epfd, EPOLL_CTL_ADD, sfd, &ev);
+
     char resp[BUF_SIZE];
-    while(true){
-        int n=epoll_wait(epfd,events,MAX_EV,-1);
-        for(int i=0;i<n;i++){
-            int fd=events[i].data.fd;
-            if(fd==sfd){while(true){int c=accept4(sfd,nullptr,nullptr,SOCK_NONBLOCK);if(c<0)break;int nd=1;setsockopt(c,IPPROTO_TCP,TCP_NODELAY,&nd,sizeof(nd));g_cb[c].len=0;ev.events=EPOLLIN|EPOLLET;ev.data.fd=c;epoll_ctl(epfd,EPOLL_CTL_ADD,c,&ev);}}
-            else{
-                CB&cb=g_cb[fd];bool closed=false;
-                while(true){int r=read(fd,cb.buf+cb.len,BUF_SIZE-cb.len-1);if(r==0){closed=true;break;}if(r<0){if(errno!=EAGAIN)closed=true;break;}cb.len+=r;}
-                if(closed){epoll_ctl(epfd,EPOLL_CTL_DEL,fd,nullptr);close(fd);continue;}
-                cb.buf[cb.len]=0;if(!strstr(cb.buf,"\r\n\r\n")){if(cb.len>=BUF_SIZE-1){epoll_ctl(epfd,EPOLL_CTL_DEL,fd,nullptr);close(fd);}continue;}
-                if(memcmp(cb.buf,"POST",4)==0){const char*cl2=strstr(cb.buf,"Content-Length:");if(!cl2)cl2=strstr(cb.buf,"content-length:");if(cl2){int clen=atoi(cl2+15);const char*he=strstr(cb.buf,"\r\n\r\n");int bs=(he+4)-cb.buf;if(cb.len-bs<clen)continue;}}
-                int rl=proc(cb.buf,cb.len,resp);
-                if(rl>0){int s=0;while(s<rl){int w=write(fd,resp+s,rl-s);if(w<=0)break;s+=w;}}
-                epoll_ctl(epfd,EPOLL_CTL_DEL,fd,nullptr);close(fd);
+
+    while (true) {
+        int n = epoll_wait(epfd, events, MAX_EV, -1);
+        for (int i = 0; i < n; i++) {
+            int fd = events[i].data.fd;
+
+            if (fd == sfd) {
+                // Accept all pending connections
+                while (true) {
+                    int c = accept4(sfd, nullptr, nullptr, SOCK_NONBLOCK);
+                    if (c < 0) break;
+                    if (c >= 4096) { close(c); continue; } // fd too high
+                    int nd = 1;
+                    setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &nd, sizeof(nd));
+                    g_cb[c].len = 0;
+                    ev.events = EPOLLIN; // Level-triggered for keep-alive
+                    ev.data.fd = c;
+                    epoll_ctl(epfd, EPOLL_CTL_ADD, c, &ev);
+                }
+                continue;
             }
+
+            // Data event on client fd
+            if (events[i].events & (EPOLLHUP | EPOLLERR)) {
+                epoll_ctl(epfd, EPOLL_CTL_DEL, fd, nullptr);
+                close(fd);
+                continue;
+            }
+
+            CB& cb = g_cb[fd];
+            int r = read(fd, cb.buf + cb.len, BUF_SIZE - cb.len - 1);
+            if (r <= 0) {
+                epoll_ctl(epfd, EPOLL_CTL_DEL, fd, nullptr);
+                close(fd);
+                continue;
+            }
+            cb.len += r;
+            cb.buf[cb.len] = 0;
+
+            // Try to process complete request(s)
+            const char* req_end = find_request_end(cb.buf, cb.len);
+            if (!req_end) {
+                if (cb.len >= BUF_SIZE - 1) { // Buffer full, drop
+                    epoll_ctl(epfd, EPOLL_CTL_DEL, fd, nullptr);
+                    close(fd);
+                }
+                continue;
+            }
+
+            // Process the request
+            int rl = make_response(cb.buf, resp);
+            if (rl > 0) {
+                int sent = 0;
+                while (sent < rl) {
+                    int w = write(fd, resp + sent, rl - sent);
+                    if (w <= 0) break;
+                    sent += w;
+                }
+            }
+
+            // Keep-alive: shift remaining data and reset for next request
+            int consumed = req_end - cb.buf;
+            int remaining = cb.len - consumed;
+            if (remaining > 0) {
+                memmove(cb.buf, req_end, remaining);
+                cb.len = remaining;
+            } else {
+                cb.len = 0;
+            }
+            // Connection stays open - HAProxy will reuse it
         }
     }
 }
