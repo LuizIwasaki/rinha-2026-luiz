@@ -117,9 +117,9 @@ static const char* find_request_end(const char* buf, int len) {
 }
 
 static int make_response(const char* req, char* resp) {
-    if (memcmp(req, "GET", 3) == 0 && strstr(req, "/ready"))
+    if (req[0] == 'G') // Respond 200 OK to any GET (health check)
         return snprintf(resp, BUF_SIZE, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n");
-    if (memcmp(req, "POST", 4) == 0 && strstr(req, "/fraud-score")) {
+    if (req[0] == 'P' && strstr(req, "/fraud-score")) {
         const char* b = strstr(req, "\r\n\r\n");
         if (!b) return 0;
         b += 4;

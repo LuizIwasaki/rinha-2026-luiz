@@ -1,6 +1,6 @@
 services:
-  haproxy:
-    image: haproxy:2.4
+  lb:
+    image: haproxy:alpine
     ports:
       - "9999:9999"
     volumes:
@@ -10,7 +10,9 @@ services:
       - api1
       - api2
     networks:
-      - rinha-network
+      rinha-net:
+        aliases:
+          - lb
     deploy:
       resources:
         limits:
@@ -25,7 +27,11 @@ services:
     volumes:
       - rinha-sockets:/sockets
     networks:
-      - rinha-network
+      - rinha-net
+    ulimits:
+      nofile:
+        soft: 100000
+        hard: 100000
     deploy:
       resources:
         limits:
@@ -40,7 +46,11 @@ services:
     volumes:
       - rinha-sockets:/sockets
     networks:
-      - rinha-network
+      - rinha-net
+    ulimits:
+      nofile:
+        soft: 100000
+        hard: 100000
     deploy:
       resources:
         limits:
@@ -48,7 +58,7 @@ services:
           memory: "165MB"
 
 networks:
-  rinha-network:
+  rinha-net:
     driver: bridge
 
 volumes:
