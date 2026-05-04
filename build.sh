@@ -4,7 +4,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 echo "Copying references.json.gz to build context..."
-cp "$SCRIPT_DIR/../resources/references.json.gz" "$SCRIPT_DIR/references.json.gz"
+cp "$SCRIPT_DIR/../resources/references.json.gz" "$SCRIPT_DIR/references.json.gz" 2>/dev/null || true
 
 echo "Building and starting containers..."
 docker compose -f "$SCRIPT_DIR/docker-compose.yml" up --build -d

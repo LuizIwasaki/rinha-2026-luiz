@@ -30,11 +30,19 @@ static bool load(){
     snprintf(p,512,"%s/labels.bin",dir);auto*lm=(uint8_t*)mf(p,sz);if(!lm)return false;g_lbl=lm+4;
     return true;
 }
-static inline float dsse(const float*a,const float*b){
-    __m128 d0=_mm_sub_ps(_mm_loadu_ps(a),_mm_loadu_ps(b)),d1=_mm_sub_ps(_mm_loadu_ps(a+4),_mm_loadu_ps(b+4)),d2=_mm_sub_ps(_mm_loadu_ps(a+8),_mm_loadu_ps(b+8));
-    __m128 s=_mm_add_ps(_mm_add_ps(_mm_mul_ps(d0,d0),_mm_mul_ps(d1,d1)),_mm_mul_ps(d2,d2));
-    s=_mm_add_ps(s,_mm_shuffle_ps(s,s,_MM_SHUFFLE(2,3,0,1)));s=_mm_add_ps(s,_mm_shuffle_ps(s,s,_MM_SHUFFLE(1,0,3,2)));
-    float r;_mm_store_ss(&r,s);float x=a[12]-b[12],y=a[13]-b[13];return r+x*x+y*y;
+#include <immintrin.h>
+static inline float dsse(const float* a, const float* b){
+    __m256 v0 = _mm256_sub_ps(_mm256_loadu_ps(a), _mm256_loadu_ps(b));
+    __m256 sq0 = _mm256_mul_ps(v0, v0);
+    __m128 v1 = _mm_sub_ps(_mm_loadu_ps(a+8), _mm_loadu_ps(b+8));
+    __m128 sq1 = _mm_mul_ps(v1, v1);
+    __m128 h1 = _mm_add_ps(_mm256_castps256_ps128(sq0), _mm256_extractf128_ps(sq0, 1));
+    __m128 s = _mm_add_ps(h1, sq1);
+    s = _mm_add_ps(s, _mm_shuffle_ps(s, s, _MM_SHUFFLE(2, 3, 0, 1)));
+    s = _mm_add_ps(s, _mm_shuffle_ps(s, s, _MM_SHUFFLE(1, 0, 3, 2)));
+    float r; _mm_store_ss(&r, s);
+    float x12 = a[12]-b[12], x13 = a[13]-b[13];
+    return r + x12*x12 + x13*x13;
 }
 static float mcc_r(const char*m){
     if(!m)return 0.5f;int v=(m[0]-'0')*1000+(m[1]-'0')*100+(m[2]-'0')*10+(m[3]-'0');
@@ -79,8 +87,8 @@ static float knn(const float q[DIMS]){
     int s=g_off[best_c],e=g_off[best_c+1];
     for(int i=s;i<e;i++){
         float d=dsse(q,g_vecs+i*DIMS);
-        if(nt<KNN){top[nt++]={d,i};if(nt==KNN)for(int j=KNN/2-1;j>=0;j--){int k=j;while(2*k+1<KNN){int ch=2*k+1;if(ch+1<KNN&&top[ch+1].d>top[ch].d)ch++;if(top[k].d>=top[ch].d)break;N t=top[k];top[k]=top[ch];top[ch]=t;k=ch;}}}
-        else if(d<top[0].d){top[0]={d,i};int k=0;while(2*k+1<KNN){int ch=2*k+1;if(ch+1<KNN&&top[ch+1].d>top[ch].d)ch++;if(top[k].d>=top[ch].d)break;N t=top[k];top[k]=top[ch];top[ch]=t;k=ch;}}
+        if(nt<KNN){top[nt++]={d,i};if(nt==KNN){for(int a=1;a<KNN;a++){N tmp=top[a];int b=a-1;while(b>=0&&top[b].d<tmp.d){top[b+1]=top[b];b--;}top[b+1]=tmp;}}}
+        else if(d<top[0].d){int b=1;while(b<KNN&&top[b].d>d){top[b-1]=top[b];b++;}top[b-1]={d,i};}
     }
     int f=0;for(int i=0;i<nt;i++)if(g_lbl[top[i].i]==1)f++;return(float)f/KNN;
 }
