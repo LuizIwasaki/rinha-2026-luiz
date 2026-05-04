@@ -1,38 +1,15 @@
 version: '3.8'
 
 services:
-  lb:
-    image: haproxy:alpine
+  api:
+    image: ghcr.io/luiziwasaki/rinha-2026-luiz:latest
     ports:
       - "9999:9999"
-    volumes:
-      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
-      - ./sockets:/sockets
-    deploy:
-      resources:
-        limits:
-          cpus: "0.10"
-          memory: "50MB"
-    depends_on:
-      - api1
-    networks:
-      - rinha-network
-
-  api1:
-    image: ghcr.io/luiziwasaki/rinha-2026-luiz:latest
     environment:
-      - SOCKET_PATH=/sockets/api.sock
+      - PORT=9999
       - DATA_DIR=/data
-    volumes:
-      - ./sockets:/sockets
     deploy:
       resources:
         limits:
-          cpus: "0.90"
-          memory: "300MB"
-    networks:
-      - rinha-network
-
-networks:
-  rinha-network:
-    driver: bridge
+          cpus: "1.0"
+          memory: "350MB"
