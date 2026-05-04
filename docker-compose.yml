@@ -20,9 +20,7 @@ services:
       - rinha-network
 
   api1:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ghcr.io/luiziwasaki/rinha-2026-luiz:latest
     environment:
       - SOCKET_PATH=/sockets/api1.sock
       - DATA_DIR=/data
@@ -37,9 +35,7 @@ services:
       - rinha-network
 
   api2:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ghcr.io/luiziwasaki/rinha-2026-luiz:latest
     environment:
       - SOCKET_PATH=/sockets/api2.sock
       - DATA_DIR=/data
