@@ -7,11 +7,12 @@ services:
       - "9999:9999"
     volumes:
       - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - sockets-volume:/sockets
     deploy:
       resources:
         limits:
           cpus: "0.10"
-          memory: "10MB"
+          memory: "50MB"
     depends_on:
       - api1
       - api2
@@ -23,13 +24,15 @@ services:
       context: .
       dockerfile: Dockerfile
     environment:
-      - PORT=8080
+      - SOCKET_PATH=/sockets/api1.sock
       - DATA_DIR=/data
+    volumes:
+      - sockets-volume:/sockets
     deploy:
       resources:
         limits:
           cpus: "0.45"
-          memory: "170MB"
+          memory: "150MB"
     networks:
       - rinha-network
 
@@ -38,15 +41,20 @@ services:
       context: .
       dockerfile: Dockerfile
     environment:
-      - PORT=8080
+      - SOCKET_PATH=/sockets/api2.sock
       - DATA_DIR=/data
+    volumes:
+      - sockets-volume:/sockets
     deploy:
       resources:
         limits:
           cpus: "0.45"
-          memory: "170MB"
+          memory: "150MB"
     networks:
       - rinha-network
+
+volumes:
+  sockets-volume:
 
 networks:
   rinha-network:
