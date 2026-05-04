@@ -327,17 +327,22 @@ int main() {
                 }
             } else {
                 ConnBuf& cb = g_conns[fd];
+                bool closed = false;
                 while (true) {
                     int r = read(fd, cb.buf+cb.len, BUF_SIZE-cb.len-1);
-                    if (r <= 0) break;
+                    if (r == 0) { closed = true; break; }
+                    if (r < 0) { if (errno != EAGAIN) closed = true; break; }
                     cb.len += r;
                 }
+                if (closed) { epoll_ctl(epfd, EPOLL_CTL_DEL, fd, nullptr); close(fd); continue; }
+
                 cb.buf[cb.len] = 0;
                 const char* hdr_end = strstr(cb.buf, "\r\n\r\n");
                 if (!hdr_end) {
                     if (cb.len >= BUF_SIZE-1) { epoll_ctl(epfd,EPOLL_CTL_DEL,fd,nullptr); close(fd); }
                     continue;
                 }
+
                 bool complete = true;
                 if (memcmp(cb.buf, "POST", 4) == 0) {
                     const char* cl = strstr(cb.buf, "Content-Length:");
@@ -348,6 +353,7 @@ int main() {
                     }
                 }
                 if (!complete) continue;
+
                 int rlen = process_request(cb.buf, cb.len, resp);
                 if (rlen > 0) {
                     int sent = 0;

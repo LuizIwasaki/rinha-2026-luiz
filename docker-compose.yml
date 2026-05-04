@@ -7,7 +7,7 @@ services:
       - "9999:9999"
     volumes:
       - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
-      - sockets-volume:/sockets
+      - ./sockets:/sockets
     deploy:
       resources:
         limits:
@@ -27,7 +27,7 @@ services:
       - SOCKET_PATH=/sockets/api1.sock
       - DATA_DIR=/data
     volumes:
-      - sockets-volume:/sockets
+      - ./sockets:/sockets
     deploy:
       resources:
         limits:
@@ -44,7 +44,7 @@ services:
       - SOCKET_PATH=/sockets/api2.sock
       - DATA_DIR=/data
     volumes:
-      - sockets-volume:/sockets
+      - ./sockets:/sockets
     deploy:
       resources:
         limits:
@@ -52,9 +52,6 @@ services:
           memory: "150MB"
     networks:
       - rinha-network
-
-volumes:
-  sockets-volume:
 
 networks:
   rinha-network:
