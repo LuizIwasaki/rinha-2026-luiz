@@ -1,6 +1,6 @@
 services:
   haproxy:
-    image: haproxy:3.3
+    image: haproxy:2.4
     ports:
       - "9999:9999"
     volumes:
@@ -15,7 +15,7 @@ services:
       resources:
         limits:
           cpus: "0.10"
-          memory: "20MB"
+          memory: "32MB"
 
   api1:
     image: ghcr.io/luiziwasaki/rinha-2026-luiz:latest

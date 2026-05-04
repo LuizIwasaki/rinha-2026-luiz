@@ -15,7 +15,10 @@
 #include <sys/un.h>
 #include <immintrin.h>
 
-static constexpr int DIMS=14, KNN=5, NPROBE=1, BUF_SIZE=4096, MAX_EV=512;
+#define BUF_SIZE 4096
+#define MAX_EV 128
+#define MAX_CONN 16384
+static constexpr int DIMS=14, KNN=5, NPROBE=1;
 static constexpr float THRESHOLD=0.6f;
 static int32_t g_nrefs=0,g_ncent=0;
 static float *g_cent=nullptr,*g_vecs=nullptr;
@@ -93,9 +96,9 @@ static float knn(const float q[DIMS]){
     int f=0;for(int i=0;i<nt;i++)if(g_lbl[top[i].i]==1)f++;return(float)f/KNN;
 }
 
-// Connection buffer - reduced to 2048 entries to save memory
+// Connection buffer - increased to 16384 entries
 struct CB{char buf[BUF_SIZE];int len;};
-static CB g_cb[4096];
+static CB g_cb[MAX_CONN];
 
 // Find end of current HTTP request, returns pointer past body or nullptr
 static const char* find_request_end(const char* buf, int len) {
@@ -196,7 +199,7 @@ int main(){
                 while (true) {
                     int c = accept4(sfd, nullptr, nullptr, SOCK_NONBLOCK);
                     if (c < 0) break;
-                    if (c >= 4096) { close(c); continue; }
+                    if (c >= MAX_CONN) { close(c); continue; }
                     if (!use_uds) { int nd=1; setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &nd, sizeof(nd)); }
                     g_cb[c].len = 0;
                     ev.events = EPOLLIN;
@@ -236,7 +239,11 @@ int main(){
                 int sent = 0;
                 while (sent < rl) {
                     int w = write(fd, resp + sent, rl - sent);
-                    if (w <= 0) break;
+                    if (w < 0) {
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+                        break;
+                    }
+                    if (w == 0) break;
                     sent += w;
                 }
             }
