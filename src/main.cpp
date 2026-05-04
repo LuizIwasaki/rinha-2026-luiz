@@ -217,7 +217,13 @@ int main(){
 
             CB& cb = g_cb[fd];
             int r = read(fd, cb.buf + cb.len, BUF_SIZE - cb.len - 1);
-            if (r <= 0) {
+            if (r < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+                epoll_ctl(epfd, EPOLL_CTL_DEL, fd, nullptr);
+                close(fd);
+                continue;
+            }
+            if (r == 0) {
                 epoll_ctl(epfd, EPOLL_CTL_DEL, fd, nullptr);
                 close(fd);
                 continue;
@@ -240,7 +246,7 @@ int main(){
                 while (sent < rl) {
                     int w = write(fd, resp + sent, rl - sent);
                     if (w < 0) {
-                        if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) break; // Stop writing for now, wait for next event (simplification)
                         break;
                     }
                     if (w == 0) break;
