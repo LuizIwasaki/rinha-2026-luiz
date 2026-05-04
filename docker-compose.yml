@@ -7,40 +7,29 @@ services:
       - "9999:9999"
     volumes:
       - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - ./sockets:/sockets
     deploy:
       resources:
         limits:
           cpus: "0.10"
-          memory: "100MB"
+          memory: "50MB"
     depends_on:
       - api1
-      - api2
     networks:
       - rinha-network
 
   api1:
     image: ghcr.io/luiziwasaki/rinha-2026-luiz:latest
     environment:
-      - PORT=8080
+      - SOCKET_PATH=/sockets/api.sock
       - DATA_DIR=/data
+    volumes:
+      - ./sockets:/sockets
     deploy:
       resources:
         limits:
-          cpus: "0.45"
-          memory: "125MB"
-    networks:
-      - rinha-network
-
-  api2:
-    image: ghcr.io/luiziwasaki/rinha-2026-luiz:latest
-    environment:
-      - PORT=8080
-      - DATA_DIR=/data
-    deploy:
-      resources:
-        limits:
-          cpus: "0.45"
-          memory: "125MB"
+          cpus: "0.90"
+          memory: "300MB"
     networks:
       - rinha-network
 
