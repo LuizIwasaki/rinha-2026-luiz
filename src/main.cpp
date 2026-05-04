@@ -1,15 +1,15 @@
-// Rinha de Backend 2026 - Fraud Detection API (Single Process, Multi-threaded)
+// Rinha de Backend 2026 - Fraud Detection (Epoll + Fixed ThreadPool + SSE2)
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <cmath>
 #include <cstdint>
 #include <algorithm>
 #include <thread>
-#include <queue>
 #include <mutex>
 #include <condition_variable>
+#include <queue>
 #include <atomic>
+#include <functional>
 #include <sys/socket.h>
 #include <sys/epoll.h>
 #include <sys/mman.h>
@@ -24,14 +24,14 @@
 static constexpr int DIMS = 14;
 static constexpr int KNN = 5;
 static constexpr float THRESHOLD = 0.6f;
-static constexpr int NPROBE = 10;
+static constexpr int NPROBE = 3;
 static constexpr int BUF_SIZE = 4096;
+static constexpr int POOL_SIZE = 2;
 
 static int32_t g_nrefs = 0, g_ncent = 0;
 static float *g_centroids = nullptr, *g_vecs = nullptr;
 static int32_t *g_offsets = nullptr;
 static uint8_t *g_lbls = nullptr;
-static std::atomic<bool> g_ready{false};
 
 static float mcc_risk(const char* m, int len) {
     if (len != 4) return 0.5f;
@@ -70,28 +70,32 @@ static bool load_data() {
     return true;
 }
 
-static inline float dist_sq_sse(const float* a, const float* b) {
-    __m128 va = _mm_loadu_ps(a), vb = _mm_loadu_ps(b), d = _mm_sub_ps(va, vb), sum = _mm_mul_ps(d, d);
-    va = _mm_loadu_ps(a+4); vb = _mm_loadu_ps(b+4); d = _mm_sub_ps(va, vb); sum = _mm_add_ps(sum, _mm_mul_ps(d, d));
-    va = _mm_loadu_ps(a+8); vb = _mm_loadu_ps(b+8); d = _mm_sub_ps(va, vb); sum = _mm_add_ps(sum, _mm_mul_ps(d, d));
+static inline float dist_sq_sse(const float* __restrict__ a, const float* __restrict__ b) {
+    __m128 d0 = _mm_sub_ps(_mm_loadu_ps(a), _mm_loadu_ps(b));
+    __m128 d1 = _mm_sub_ps(_mm_loadu_ps(a+4), _mm_loadu_ps(b+4));
+    __m128 d2 = _mm_sub_ps(_mm_loadu_ps(a+8), _mm_loadu_ps(b+8));
+    __m128 sum = _mm_add_ps(_mm_add_ps(_mm_mul_ps(d0,d0), _mm_mul_ps(d1,d1)), _mm_mul_ps(d2,d2));
     sum = _mm_add_ps(sum, _mm_shuffle_ps(sum, sum, _MM_SHUFFLE(2,3,0,1)));
     sum = _mm_add_ps(sum, _mm_shuffle_ps(sum, sum, _MM_SHUFFLE(1,0,3,2)));
     float r; _mm_store_ss(&r, sum);
-    float d12 = a[12]-b[12], d13 = a[13]-b[13]; return r + d12*d12 + d13*d13;
+    float d12 = a[12]-b[12], d13 = a[13]-b[13];
+    return r + d12*d12 + d13*d13;
 }
 
 static double get_num(const char* js, const char* key) {
-    const char* p = strstr(js, key); if (!p) return 0.0; p += strlen(key);
-    while (*p && (*p=='"'||*p==':'||*p==' '||*p=='\t')) p++; return strtod(p, nullptr);
+    const char* p = strstr(js, key); if (!p) return 0;
+    p += strlen(key); while (*p && (*p=='"'||*p==':'||*p==' '||*p=='\t')) p++;
+    return strtod(p, nullptr);
 }
 static bool get_bool(const char* js, const char* key) {
-    const char* p = strstr(js, key); if (!p) return false; p += strlen(key);
-    while (*p && (*p=='"'||*p==':'||*p==' ')) p++; return (*p == 't');
+    const char* p = strstr(js, key); if (!p) return false;
+    p += strlen(key); while (*p && (*p=='"'||*p==':'||*p==' ')) p++;
+    return *p == 't';
 }
 static bool is_known_merch(const char* js) {
     const char* merch = strstr(js, "\"merchant\""); if (!merch) return false;
-    const char* id_p = strstr(merch, "\"id\""); if (!id_p) return false; id_p += 4;
-    while (*id_p && *id_p != '"') id_p++; if (*id_p=='"') id_p++;
+    const char* id_p = strstr(merch, "\"id\""); if (!id_p) return false;
+    id_p += 4; while (*id_p && *id_p != '"') id_p++; if (*id_p=='"') id_p++;
     const char* id_e = id_p; while (*id_e && *id_e != '"') id_e++;
     int id_len = id_e - id_p;
     const char* km = strstr(js, "\"known_merchants\""); if (!km) return false;
@@ -154,7 +158,7 @@ static void vectorize(const char* js, float v[DIMS]) {
     if (lt_null) { v[5] = -1.0f; v[6] = -1.0f; }
     else {
         double mins = get_minutes_since(js);
-        v[5] = clamp01((float)(mins/1440.0f));
+        v[5] = clamp01((float)(mins/1440.0));
         v[6] = clamp01((float)get_num(js, "\"km_from_current\"")/1000.0f);
     }
     v[7] = clamp01((float)get_num(js, "\"km_from_home\"")/1000.0f);
@@ -163,16 +167,9 @@ static void vectorize(const char* js, float v[DIMS]) {
     v[10] = get_bool(js, "\"card_present\"") ? 1.0f : 0.0f;
     v[11] = is_known_merch(js) ? 0.0f : 1.0f;
     const char* mcc_p = strstr(js, "\"mcc\"");
-    if (mcc_p) {
-        mcc_p += 5; while(*mcc_p && *mcc_p!='"') mcc_p++;
-        if (*mcc_p=='"') v[12] = mcc_risk(mcc_p+1, 4); else v[12] = 0.5f;
-    } else v[12] = 0.5f;
-    float mavg = 0;
-    const char* merch = strstr(js, "\"merchant\"");
-    if (merch) {
-        const char* ma = strstr(merch, "\"avg_amount\"");
-        if (ma) { ma += 12; while(*ma && (*ma=='"'||*ma==':'||*ma==' ')) ma++; mavg = strtof(ma, nullptr); }
-    }
+    if (mcc_p) { mcc_p+=5; while(*mcc_p&&*mcc_p!='"') mcc_p++; if(*mcc_p=='"') v[12]=mcc_risk(mcc_p+1,4); else v[12]=0.5f; } else v[12]=0.5f;
+    float mavg = 0; const char* merch = strstr(js, "\"merchant\"");
+    if (merch) { const char* ma = strstr(merch, "\"avg_amount\""); if (ma) { ma+=12; while(*ma&&(*ma=='"'||*ma==':'||*ma==' '))ma++; mavg=strtof(ma,nullptr); } }
     v[13] = clamp01(mavg/10000.0f);
 }
 
@@ -183,125 +180,109 @@ static float knn_search(const float query[DIMS]) {
         float d = dist_sq_sse(query, g_centroids + c * DIMS);
         if (np < NPROBE) {
             probe[np++] = {d, c};
-            if (np == NPROBE) {
-                for (int j = NPROBE/2-1; j >= 0; j--) {
-                    int k = j;
-                    while (2*k+1 < NPROBE) {
-                        int ch = 2*k+1; if (ch+1<NPROBE && probe[ch+1].d>probe[ch].d) ch++;
-                        if (probe[k].d >= probe[ch].d) break;
-                        CDist t = probe[k]; probe[k] = probe[ch]; probe[ch] = t; k = ch;
-                    }
-                }
+            if (np == NPROBE) for (int j = NPROBE/2-1; j >= 0; j--) {
+                int k=j; while(2*k+1<NPROBE){int ch=2*k+1;if(ch+1<NPROBE&&probe[ch+1].d>probe[ch].d)ch++;if(probe[k].d>=probe[ch].d)break;CDist t=probe[k];probe[k]=probe[ch];probe[ch]=t;k=ch;}
             }
         } else if (d < probe[0].d) {
-            probe[0] = {d, c};
-            int k = 0;
-            while (2*k+1 < NPROBE) {
-                int ch = 2*k+1; if (ch+1<NPROBE && probe[ch+1].d>probe[ch].d) ch++;
-                if (probe[k].d >= probe[ch].d) break;
-                CDist t = probe[k]; probe[k] = probe[ch]; probe[ch] = t; k = ch;
-            }
+            probe[0]={d,c}; int k=0; while(2*k+1<NPROBE){int ch=2*k+1;if(ch+1<NPROBE&&probe[ch+1].d>probe[ch].d)ch++;if(probe[k].d>=probe[ch].d)break;CDist t=probe[k];probe[k]=probe[ch];probe[ch]=t;k=ch;}
         }
     }
-    struct Neighbor { float d; int i; };
-    Neighbor top[KNN]; int nt = 0;
+    struct Neighbor { float d; int i; }; Neighbor top[KNN]; int nt = 0;
     for (int p = 0; p < np; p++) {
-        int start = g_offsets[probe[p].i], end = g_offsets[probe[p].i + 1];
+        int start = g_offsets[probe[p].i], end = g_offsets[probe[p].i+1];
         for (int i = start; i < end; i++) {
             float d = dist_sq_sse(query, g_vecs + i * DIMS);
-            if (nt < KNN) {
-                top[nt++] = {d, i};
-                if (nt == KNN) for (int j = KNN/2-1; j >= 0; j--) {
-                    int k = j; while (2*k+1<KNN) { int ch=2*k+1; if(ch+1<KNN&&top[ch+1].d>top[ch].d) ch++; if(top[k].d>=top[ch].d) break; Neighbor t=top[k]; top[k]=top[ch]; top[ch]=t; k=ch; }
-                }
-            } else if (d < top[0].d) {
-                top[0] = {d, i};
-                int k = 0; while (2*k+1<KNN) { int ch=2*k+1; if(ch+1<KNN&&top[ch+1].d>top[ch].d) ch++; if(top[k].d>=top[ch].d) break; Neighbor t=top[k]; top[k]=top[ch]; top[ch]=t; k=ch; }
-            }
+            if (nt < KNN) { top[nt++]={d,i}; if(nt==KNN) for(int j=KNN/2-1;j>=0;j--){int k=j;while(2*k+1<KNN){int ch=2*k+1;if(ch+1<KNN&&top[ch+1].d>top[ch].d)ch++;if(top[k].d>=top[ch].d)break;Neighbor t=top[k];top[k]=top[ch];top[ch]=t;k=ch;}} }
+            else if (d < top[0].d) { top[0]={d,i}; int k=0; while(2*k+1<KNN){int ch=2*k+1;if(ch+1<KNN&&top[ch+1].d>top[ch].d)ch++;if(top[k].d>=top[ch].d)break;Neighbor t=top[k];top[k]=top[ch];top[ch]=t;k=ch;} }
         }
     }
     int f = 0; for (int i = 0; i < nt; i++) if (g_lbls[top[i].i] == 1) f++;
     return (float)f / (float)KNN;
 }
 
-// Worker thread: reads full request, processes, responds, closes
-static void handle_connection(int fd) {
+// Thread pool
+class ThreadPool {
+    std::vector<std::thread> workers;
+    std::queue<std::function<void()>> tasks;
+    std::mutex mtx;
+    std::condition_variable cv;
+    bool stop = false;
+public:
+    ThreadPool(int n) {
+        for (int i = 0; i < n; i++)
+            workers.emplace_back([this]{
+                while (true) {
+                    std::function<void()> task;
+                    { std::unique_lock<std::mutex> lock(mtx); cv.wait(lock, [this]{return stop||!tasks.empty();}); if(stop&&tasks.empty()) return; task=std::move(tasks.front()); tasks.pop(); }
+                    task();
+                }
+            });
+    }
+    void submit(std::function<void()> task) {
+        { std::lock_guard<std::mutex> lock(mtx); tasks.push(std::move(task)); }
+        cv.notify_one();
+    }
+    ~ThreadPool() { {std::lock_guard<std::mutex> lock(mtx); stop=true;} cv.notify_all(); for(auto& w:workers) w.join(); }
+};
+
+static void handle_fd(int fd) {
     char buf[BUF_SIZE], resp[BUF_SIZE];
     int total = 0;
     while (total < BUF_SIZE - 1) {
         int r = read(fd, buf + total, BUF_SIZE - 1 - total);
-        if (r <= 0) break;
-        total += r;
-        buf[total] = 0;
+        if (r <= 0) { if (r == 0 || errno != EAGAIN) break; continue; }
+        total += r; buf[total] = 0;
         if (strstr(buf, "\r\n\r\n")) break;
     }
     if (total <= 0) { close(fd); return; }
     buf[total] = 0;
-
     int rlen = 0;
     if (memcmp(buf, "GET", 3) == 0 && strstr(buf, "/ready")) {
-        if (g_ready.load()) rlen = snprintf(resp, BUF_SIZE, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-        else rlen = snprintf(resp, BUF_SIZE, "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        rlen = snprintf(resp, BUF_SIZE, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
     } else if (memcmp(buf, "POST", 4) == 0 && strstr(buf, "/fraud-score")) {
-        // Ensure we have the full body
         const char* hdr_end = strstr(buf, "\r\n\r\n");
         if (hdr_end) {
             const char* cl = strstr(buf, "Content-Length:");
             if (!cl) cl = strstr(buf, "content-length:");
             if (cl) {
-                int clen = atoi(cl + 15);
-                int body_start = (hdr_end + 4) - buf;
-                while (total - body_start < clen && total < BUF_SIZE - 1) {
-                    int r = read(fd, buf + total, BUF_SIZE - 1 - total);
-                    if (r <= 0) break;
-                    total += r;
+                int clen = atoi(cl + 15), bs = (hdr_end+4)-buf;
+                while (total - bs < clen && total < BUF_SIZE-1) {
+                    int r = read(fd, buf+total, BUF_SIZE-1-total);
+                    if (r <= 0) break; total += r;
                 }
             }
             buf[total] = 0;
-            const char* body = hdr_end + 4;
-            float q[DIMS]; vectorize(body, q);
+            float q[DIMS]; vectorize(hdr_end+4, q);
             float score = knn_search(q);
-            char json[128];
-            int jl = snprintf(json, sizeof(json), "{\"approved\":%s,\"fraud_score\":%.1f}", score < THRESHOLD ? "true" : "false", score);
+            char json[128]; int jl = snprintf(json, sizeof(json), "{\"approved\":%s,\"fraud_score\":%.1f}", score<THRESHOLD?"true":"false", score);
             rlen = snprintf(resp, BUF_SIZE, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", jl, json);
         }
     } else {
         rlen = snprintf(resp, BUF_SIZE, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
     }
-    if (rlen > 0) {
-        int sent = 0;
-        while (sent < rlen) { int w = write(fd, resp + sent, rlen - sent); if (w <= 0) break; sent += w; }
-    }
+    if (rlen > 0) { int s=0; while(s<rlen){int w=write(fd,resp+s,rlen-s);if(w<=0)break;s+=w;} }
     close(fd);
 }
 
 int main() {
-    int port = 9999;
-    const char* pe = getenv("PORT"); if (pe) port = atoi(pe);
-
+    int port = 8080; const char* pe = getenv("PORT"); if (pe) port = atoi(pe);
     if (!load_data()) { fprintf(stderr, "Failed to load data\n"); return 1; }
-    g_ready.store(true);
-    fprintf(stderr, "Data loaded, listening on port %d\n", port);
+    fprintf(stderr, "Data loaded, port %d\n", port);
 
-    int sfd = socket(AF_INET, SOCK_STREAM, 0);
-    int opt = 1;
+    ThreadPool pool(POOL_SIZE);
+
+    int sfd = socket(AF_INET, SOCK_STREAM, 0); int opt = 1;
     setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
     setsockopt(sfd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
-
-    struct sockaddr_in addr = {};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons(port);
-
+    struct sockaddr_in addr = {}; addr.sin_family = AF_INET; addr.sin_addr.s_addr = INADDR_ANY; addr.sin_port = htons(port);
     if (bind(sfd, (struct sockaddr*)&addr, sizeof(addr)) < 0) { perror("bind"); return 1; }
-    if (listen(sfd, SOMAXCONN) < 0) { perror("listen"); return 1; }
+    listen(sfd, SOMAXCONN);
 
-    // Accept loop: spawn a detached thread per connection
     while (true) {
         int cfd = accept(sfd, nullptr, nullptr);
         if (cfd < 0) continue;
         int nd = 1; setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, &nd, sizeof(nd));
-        std::thread(handle_connection, cfd).detach();
+        pool.submit([cfd]{ handle_fd(cfd); });
     }
     return 0;
 }
