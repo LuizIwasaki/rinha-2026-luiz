@@ -115,7 +115,7 @@ static const char* find_request_end(const char* buf, int len) {
 
 static int make_response(const char* req, char* resp) {
     if (memcmp(req, "GET", 3) == 0 && strstr(req, "/ready"))
-        return snprintf(resp, BUF_SIZE, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+        return snprintf(resp, BUF_SIZE, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n");
     if (memcmp(req, "POST", 4) == 0 && strstr(req, "/fraud-score")) {
         const char* b = strstr(req, "\r\n\r\n");
         if (!b) return 0;
@@ -123,40 +123,59 @@ static int make_response(const char* req, char* resp) {
         float q[DIMS]; vec(b, q); float s = knn(q);
         char j[128];
         int jl = snprintf(j, 128, "{\"approved\":%s,\"fraud_score\":%.1f}", s < THRESHOLD ? "true" : "false", s);
-        return snprintf(resp, BUF_SIZE, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", jl, j);
+        return snprintf(resp, BUF_SIZE, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: keep-alive\r\n\r\n%s", jl, j);
     }
-    return snprintf(resp, BUF_SIZE, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+    return snprintf(resp, BUF_SIZE, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
 }
 
 int main(){
-    if(!load()) return 1;
+    if(!load()) { fprintf(stderr, "Failed to load data\n"); return 1; }
 
-    const char* sock_path = getenv("SOCKET_PATH");
+    const char* sock_path = getenv("UDS_PATH");
+    if (!sock_path) sock_path = getenv("SOCKET_PATH");
+    
     bool use_uds = (sock_path != nullptr);
     int sfd;
 
     if (use_uds) {
         sfd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (sfd < 0) { perror("socket"); return 1; }
+        
+        // Ensure directory exists
+        char dir[256]; strncpy(dir, sock_path, sizeof(dir)-1);
+        char* last_slash = strrchr(dir, '/');
+        if (last_slash) {
+            *last_slash = 0;
+            mkdir(dir, 0777);
+        }
+
         unlink(sock_path);
         struct sockaddr_un uaddr = {};
         uaddr.sun_family = AF_UNIX;
         strncpy(uaddr.sun_path, sock_path, sizeof(uaddr.sun_path) - 1);
-        bind(sfd, (struct sockaddr*)&uaddr, sizeof(uaddr));
+        if (bind(sfd, (struct sockaddr*)&uaddr, sizeof(uaddr)) < 0) {
+            perror("bind uds");
+            return 1;
+        }
         chmod(sock_path, 0666);
-        fprintf(stderr, "UDS: %s\n", sock_path);
+        fprintf(stderr, "Listening on UDS: %s\n", sock_path);
     } else {
         int port = 8080;
         const char* pe = getenv("PORT"); if (pe) port = atoi(pe);
         sfd = socket(AF_INET, SOCK_STREAM, 0);
+        if (sfd < 0) { perror("socket"); return 1; }
         int opt = 1;
         setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
         struct sockaddr_in addr = {};
         addr.sin_family = AF_INET; addr.sin_addr.s_addr = INADDR_ANY; addr.sin_port = htons(port);
-        bind(sfd, (struct sockaddr*)&addr, sizeof(addr));
-        fprintf(stderr, "TCP port %d\n", port);
+        if (bind(sfd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+            perror("bind tcp");
+            return 1;
+        }
+        fprintf(stderr, "Listening on TCP port %d\n", port);
     }
 
-    listen(sfd, 4096);
+    if (listen(sfd, 4096) < 0) { perror("listen"); return 1; }
     fcntl(sfd, F_SETFL, O_NONBLOCK);
 
     int epfd = epoll_create1(0);
@@ -165,6 +184,8 @@ int main(){
     epoll_ctl(epfd, EPOLL_CTL_ADD, sfd, &ev);
 
     char resp[BUF_SIZE];
+    fprintf(stderr, "Server ready\n");
+    fflush(stderr);
 
     while (true) {
         int n = epoll_wait(epfd, events, MAX_EV, -1);

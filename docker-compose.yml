@@ -1,5 +1,5 @@
 services:
-  lb:
+  haproxy:
     image: haproxy:3.3
     ports:
       - "9999:9999"
@@ -14,13 +14,13 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.20"
-          memory: "50MB"
+          cpus: "0.10"
+          memory: "20MB"
 
   api1:
     image: ghcr.io/luiziwasaki/rinha-2026-luiz:latest
     environment:
-      - SOCKET_PATH=/sockets/api1.sock
+      - UDS_PATH=/sockets/api1.sock
       - DATA_DIR=/data
     volumes:
       - rinha-sockets:/sockets
@@ -29,13 +29,13 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.40"
-          memory: "150MB"
+          cpus: "0.45"
+          memory: "165MB"
 
   api2:
     image: ghcr.io/luiziwasaki/rinha-2026-luiz:latest
     environment:
-      - SOCKET_PATH=/sockets/api2.sock
+      - UDS_PATH=/sockets/api2.sock
       - DATA_DIR=/data
     volumes:
       - rinha-sockets:/sockets
@@ -44,8 +44,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.40"
-          memory: "150MB"
+          cpus: "0.45"
+          memory: "165MB"
 
 networks:
   rinha-network:
