@@ -1,49 +1,55 @@
-version: '3.8'
-
 services:
   lb:
-    image: haproxy:alpine
+    image: haproxy:3.3
     ports:
       - "9999:9999"
     volumes:
       - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
-    deploy:
-      resources:
-        limits:
-          cpus: "0.10"
-          memory: "20MB"
+      - rinha-sockets:/sockets
     depends_on:
       - api1
       - api2
     networks:
       - rinha-network
+    deploy:
+      resources:
+        limits:
+          cpus: "0.20"
+          memory: "50MB"
 
   api1:
     image: ghcr.io/luiziwasaki/rinha-2026-luiz:latest
     environment:
-      - PORT=8080
+      - SOCKET_PATH=/sockets/api1.sock
       - DATA_DIR=/data
+    volumes:
+      - rinha-sockets:/sockets
+    networks:
+      - rinha-network
     deploy:
       resources:
         limits:
-          cpus: "0.45"
-          memory: "165MB"
-    networks:
-      - rinha-network
+          cpus: "0.40"
+          memory: "150MB"
 
   api2:
     image: ghcr.io/luiziwasaki/rinha-2026-luiz:latest
     environment:
-      - PORT=8080
+      - SOCKET_PATH=/sockets/api2.sock
       - DATA_DIR=/data
+    volumes:
+      - rinha-sockets:/sockets
+    networks:
+      - rinha-network
     deploy:
       resources:
         limits:
-          cpus: "0.45"
-          memory: "165MB"
-    networks:
-      - rinha-network
+          cpus: "0.40"
+          memory: "150MB"
 
 networks:
   rinha-network:
     driver: bridge
+
+volumes:
+  rinha-sockets:

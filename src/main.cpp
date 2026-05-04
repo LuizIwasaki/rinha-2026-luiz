@@ -12,6 +12,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <cerrno>
+#include <sys/un.h>
 #include <immintrin.h>
 
 static constexpr int DIMS=14, KNN=5, NPROBE=1, BUF_SIZE=4096, MAX_EV=512;
@@ -128,17 +129,34 @@ static int make_response(const char* req, char* resp) {
 }
 
 int main(){
-    int port=8080; const char*pe=getenv("PORT"); if(pe) port=atoi(pe);
     if(!load()) return 1;
-    fprintf(stderr, "Loaded %d refs, %d centroids, port %d\n", g_nrefs, g_ncent, port);
 
-    int sfd = socket(AF_INET, SOCK_STREAM, 0);
-    int opt = 1;
-    setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    struct sockaddr_in addr = {};
-    addr.sin_family = AF_INET; addr.sin_addr.s_addr = INADDR_ANY; addr.sin_port = htons(port);
-    bind(sfd, (struct sockaddr*)&addr, sizeof(addr));
-    listen(sfd, SOMAXCONN);
+    const char* sock_path = getenv("SOCKET_PATH");
+    bool use_uds = (sock_path != nullptr);
+    int sfd;
+
+    if (use_uds) {
+        sfd = socket(AF_UNIX, SOCK_STREAM, 0);
+        unlink(sock_path);
+        struct sockaddr_un uaddr = {};
+        uaddr.sun_family = AF_UNIX;
+        strncpy(uaddr.sun_path, sock_path, sizeof(uaddr.sun_path) - 1);
+        bind(sfd, (struct sockaddr*)&uaddr, sizeof(uaddr));
+        chmod(sock_path, 0666);
+        fprintf(stderr, "UDS: %s\n", sock_path);
+    } else {
+        int port = 8080;
+        const char* pe = getenv("PORT"); if (pe) port = atoi(pe);
+        sfd = socket(AF_INET, SOCK_STREAM, 0);
+        int opt = 1;
+        setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        struct sockaddr_in addr = {};
+        addr.sin_family = AF_INET; addr.sin_addr.s_addr = INADDR_ANY; addr.sin_port = htons(port);
+        bind(sfd, (struct sockaddr*)&addr, sizeof(addr));
+        fprintf(stderr, "TCP port %d\n", port);
+    }
+
+    listen(sfd, 4096);
     fcntl(sfd, F_SETFL, O_NONBLOCK);
 
     int epfd = epoll_create1(0);
@@ -154,22 +172,19 @@ int main(){
             int fd = events[i].data.fd;
 
             if (fd == sfd) {
-                // Accept all pending connections
                 while (true) {
                     int c = accept4(sfd, nullptr, nullptr, SOCK_NONBLOCK);
                     if (c < 0) break;
-                    if (c >= 4096) { close(c); continue; } // fd too high
-                    int nd = 1;
-                    setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &nd, sizeof(nd));
+                    if (c >= 4096) { close(c); continue; }
+                    if (!use_uds) { int nd=1; setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &nd, sizeof(nd)); }
                     g_cb[c].len = 0;
-                    ev.events = EPOLLIN; // Level-triggered for keep-alive
+                    ev.events = EPOLLIN;
                     ev.data.fd = c;
                     epoll_ctl(epfd, EPOLL_CTL_ADD, c, &ev);
                 }
                 continue;
             }
 
-            // Data event on client fd
             if (events[i].events & (EPOLLHUP | EPOLLERR)) {
                 epoll_ctl(epfd, EPOLL_CTL_DEL, fd, nullptr);
                 close(fd);
@@ -186,17 +201,15 @@ int main(){
             cb.len += r;
             cb.buf[cb.len] = 0;
 
-            // Try to process complete request(s)
             const char* req_end = find_request_end(cb.buf, cb.len);
             if (!req_end) {
-                if (cb.len >= BUF_SIZE - 1) { // Buffer full, drop
+                if (cb.len >= BUF_SIZE - 1) {
                     epoll_ctl(epfd, EPOLL_CTL_DEL, fd, nullptr);
                     close(fd);
                 }
                 continue;
             }
 
-            // Process the request
             int rl = make_response(cb.buf, resp);
             if (rl > 0) {
                 int sent = 0;
@@ -207,7 +220,6 @@ int main(){
                 }
             }
 
-            // Keep-alive: shift remaining data and reset for next request
             int consumed = req_end - cb.buf;
             int remaining = cb.len - consumed;
             if (remaining > 0) {
@@ -216,7 +228,6 @@ int main(){
             } else {
                 cb.len = 0;
             }
-            // Connection stays open - HAProxy will reuse it
         }
     }
 }
