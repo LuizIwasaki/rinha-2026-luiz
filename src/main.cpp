@@ -18,7 +18,7 @@
 
 #define BUF_SIZE 4096
 #define MAX_EV 128
-#define MAX_CONN 2048
+#define MAX_CONN 16384
 static constexpr int DIMS=14, KNN=5, NPROBE=1;
 static constexpr float THRESHOLD=0.6f;
 static int32_t g_nrefs=0,g_ncent=0;
@@ -115,11 +115,8 @@ static const char* find_request_end(const char* buf, int len) {
     if (len - body_offset >= clen) return body + clen;
     return nullptr; // body incomplete
 }
-
 static int make_response(const char* req, char* resp) {
-    if (req[0] == 'G' || req[0] == 'H') // Respond 200 OK to any GET/HEAD (health check)
-        return snprintf(resp, BUF_SIZE, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\nConnection: keep-alive\r\n\r\n{\"status\":\"ok\"}");
-    if (req[0] == 'P' && strstr(req, "/fraud-score")) {
+    if (strstr(req, "/fraud-score")) {
         const char* b = strstr(req, "\r\n\r\n");
         if (!b) return 0;
         b += 4;
@@ -128,7 +125,8 @@ static int make_response(const char* req, char* resp) {
         int jl = snprintf(j, 128, "{\"approved\":%s,\"fraud_score\":%.1f}", s < THRESHOLD ? "true" : "false", s);
         return snprintf(resp, BUF_SIZE, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: keep-alive\r\n\r\n%s", jl, j);
     }
-    return snprintf(resp, BUF_SIZE, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    // Default response for Health Check (GET /ready, GET /ping, etc)
+    return snprintf(resp, BUF_SIZE, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\nConnection: keep-alive\r\n\r\n{\"status\":\"ok\"}");
 }
 
 int main(){
