@@ -1,4 +1,5 @@
 // Rinha 2026 - Epoll + HTTP Keep-Alive + AVX2 + NPROBE=1
+#define _GNU_SOURCE
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -17,7 +18,7 @@
 
 #define BUF_SIZE 4096
 #define MAX_EV 128
-#define MAX_CONN 16384
+#define MAX_CONN 2048
 static constexpr int DIMS=14, KNN=5, NPROBE=1;
 static constexpr float THRESHOLD=0.6f;
 static int32_t g_nrefs=0,g_ncent=0;
@@ -25,7 +26,7 @@ static float *g_cent=nullptr,*g_vecs=nullptr;
 static int32_t *g_off=nullptr;
 static uint8_t *g_lbl=nullptr;
 
-static void* mf(const char* p,size_t& sz){int fd=open(p,O_RDONLY);if(fd<0)return nullptr;struct stat st;fstat(fd,&st);sz=st.st_size;void*m=mmap(nullptr,sz,PROT_READ,MAP_PRIVATE|MAP_POPULATE,fd,0);close(fd);return m==MAP_FAILED?nullptr:m;}
+static void* mf(const char* p,size_t& sz){int fd=open(p,O_RDONLY);if(fd<0)return nullptr;struct stat st;fstat(fd,&st);sz=st.st_size;void*m=mmap(nullptr,sz,PROT_READ,MAP_PRIVATE,fd,0);close(fd);return m==MAP_FAILED?nullptr:m;}
 static bool load(){
     const char*dir=getenv("DATA_DIR");if(!dir)dir="/data";char p[512];size_t sz;
     snprintf(p,512,"%s/centroids.bin",dir);auto*cm=(uint8_t*)mf(p,sz);if(!cm)return false;g_ncent=*(int32_t*)cm;g_cent=(float*)(cm+8);
@@ -107,8 +108,7 @@ static const char* find_request_end(const char* buf, int len) {
     const char* body = hdr_end + 4;
     if (memcmp(buf, "GET", 3) == 0) return body; // GET has no body
     // POST - check Content-Length
-    const char* cl = strstr(buf, "Content-Length:");
-    if (!cl) cl = strstr(buf, "content-length:");
+    const char* cl = strcasestr(buf, "content-length:");
     if (!cl) return body;
     int clen = atoi(cl + 15);
     int body_offset = body - buf;
@@ -117,7 +117,7 @@ static const char* find_request_end(const char* buf, int len) {
 }
 
 static int make_response(const char* req, char* resp) {
-    if (req[0] == 'G') // Respond 200 OK to any GET (health check)
+    if (req[0] == 'G' || req[0] == 'H') // Respond 200 OK to any GET/HEAD (health check)
         return snprintf(resp, BUF_SIZE, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n");
     if (req[0] == 'P' && strstr(req, "/fraud-score")) {
         const char* b = strstr(req, "\r\n\r\n");
@@ -231,36 +231,39 @@ int main(){
             cb.len += r;
             cb.buf[cb.len] = 0;
 
-            const char* req_end = find_request_end(cb.buf, cb.len);
-            if (!req_end) {
-                if (cb.len >= BUF_SIZE - 1) {
-                    epoll_ctl(epfd, EPOLL_CTL_DEL, fd, nullptr);
-                    close(fd);
-                }
-                continue;
-            }
-
-            int rl = make_response(cb.buf, resp);
-            if (rl > 0) {
-                int sent = 0;
-                while (sent < rl) {
-                    int w = write(fd, resp + sent, rl - sent);
-                    if (w < 0) {
-                        if (errno == EAGAIN || errno == EWOULDBLOCK) break; // Stop writing for now, wait for next event (simplification)
-                        break;
+            while (cb.len > 0) {
+                const char* req_end = find_request_end(cb.buf, cb.len);
+                if (!req_end) {
+                    if (cb.len >= BUF_SIZE - 1) {
+                        epoll_ctl(epfd, EPOLL_CTL_DEL, fd, nullptr);
+                        close(fd);
                     }
-                    if (w == 0) break;
-                    sent += w;
+                    break;
                 }
-            }
 
-            int consumed = req_end - cb.buf;
-            int remaining = cb.len - consumed;
-            if (remaining > 0) {
-                memmove(cb.buf, req_end, remaining);
-                cb.len = remaining;
-            } else {
-                cb.len = 0;
+                int rl = make_response(cb.buf, resp);
+                if (rl > 0) {
+                    int sent = 0;
+                    while (sent < rl) {
+                        int w = write(fd, resp + sent, rl - sent);
+                        if (w < 0) {
+                            if (errno == EAGAIN || errno == EWOULDBLOCK) break; // Stop writing for now, wait for next event (simplification)
+                            break;
+                        }
+                        if (w == 0) break;
+                        sent += w;
+                    }
+                }
+
+                int consumed = req_end - cb.buf;
+                int remaining = cb.len - consumed;
+                if (remaining > 0) {
+                    memmove(cb.buf, req_end, remaining);
+                    cb.len = remaining;
+                    cb.buf[cb.len] = 0;
+                } else {
+                    cb.len = 0;
+                }
             }
         }
     }
