@@ -118,7 +118,7 @@ static const char* find_request_end(const char* buf, int len) {
 
 static int make_response(const char* req, char* resp) {
     if (req[0] == 'G' || req[0] == 'H') // Respond 200 OK to any GET/HEAD (health check)
-        return snprintf(resp, BUF_SIZE, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n");
+        return snprintf(resp, BUF_SIZE, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\nConnection: keep-alive\r\n\r\n{\"status\":\"ok\"}");
     if (req[0] == 'P' && strstr(req, "/fraud-score")) {
         const char* b = strstr(req, "\r\n\r\n");
         if (!b) return 0;
@@ -160,7 +160,7 @@ int main(){
             perror("bind uds");
             return 1;
         }
-        chmod(sock_path, 0666);
+        chmod(sock_path, 0666); // Allow HAProxy (running as non-root) to connect
         fprintf(stderr, "Listening on UDS: %s\n", sock_path);
     } else {
         int port = 8080;

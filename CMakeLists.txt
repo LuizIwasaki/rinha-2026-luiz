@@ -8,5 +8,5 @@ add_executable(preprocess tools/preprocess.cpp)
 target_compile_options(preprocess PRIVATE -O2)
 
 add_executable(rinha_api src/main.cpp)
-target_compile_options(rinha_api PRIVATE -O3 -march=x86-64-v3 -ffast-math -flto -DNDEBUG -funroll-loops)
+target_compile_options(rinha_api PRIVATE -O3 -ffast-math -flto -DNDEBUG -funroll-loops)
 target_link_options(rinha_api PRIVATE -flto)
